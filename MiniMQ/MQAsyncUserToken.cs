@@ -10,6 +10,16 @@ namespace MiniMQ
         Unknown = -1,
         Ack = 0,
         PutMessage = 1,
+        SendMessage = 2,
+        Heartbeat = 3,
+        Handshake = 4
+    }
+
+    public enum ClientType
+    {
+        Unknown = -1,
+        Sender = 0,
+        Reader = 1
     }
 
     public class CollectionState
@@ -24,6 +34,8 @@ namespace MiniMQ
     public class MQAsyncUserToken
     {
         public Guid Id { get; }
+
+        public ClientType ClientType { get; set; }
 
         public Socket Socket { get; }
 
@@ -41,6 +53,7 @@ namespace MiniMQ
         public MQAsyncUserToken(Socket socket)
         {
             Id = Guid.NewGuid();
+            ClientType = ClientType.Unknown;
             LastActivity = DateTime.Now;
             CollectionState = new CollectionState();
 

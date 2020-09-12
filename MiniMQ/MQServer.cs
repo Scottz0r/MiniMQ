@@ -14,10 +14,9 @@ namespace MiniMQ
 
         private Socket _listenSocket;
 
-        // TODO: Maybe need another structure for concurrency.
-        private List<MQAsyncUserToken> _clients = new List<MQAsyncUserToken>();
-
         private Semaphore _acceptSemaphore = new Semaphore(1, 1);
+
+        private MessageQueueController _controller = new MessageQueueController();
 
         public MQServer()
         {
@@ -50,7 +49,7 @@ namespace MiniMQ
             var acceptEventArg = new SocketAsyncEventArgs();
             acceptEventArg.Completed += new EventHandler<SocketAsyncEventArgs>(ProcessAccept);
 
-            for (;;)
+            for (; ; )
             {
                 // Only process one accept at a time. Use a semaphore to handle instant process and async callback.
                 _acceptSemaphore.WaitOne();
@@ -98,10 +97,10 @@ namespace MiniMQ
                 readEventArgs.SetBuffer(token.Buffer, 0, token.Buffer.Length);
 
                 // Add to list of connected clients.
-                lock (_clients)
-                {
-                    _clients.Add(token);
-                }
+                //lock (_clients)
+                //{
+                //    _clients.Add(token);
+                //}
 
                 // As soon as the client is connected, post a receive to the connection
                 bool willRaiseEvent = e.AcceptSocket.ReceiveAsync(readEventArgs);
@@ -149,27 +148,16 @@ namespace MiniMQ
             {
                 Log.Debug("Received {Bytes} from client {ClientId}", e.BytesTransferred, token.Id);
 
-                // TODO: Stat tracking.
-                // Increment the count of the total bytes receive by the server
-                // Interlocked.Add(ref m_totalBytesRead, e.BytesTransferred);
-                // Console.WriteLine("The server has read a total of {0} bytes", m_totalBytesRead);
-
-                // TODO: Need to know when to go back into a read state. Is there a way to do this without recursion?
-                CollectMessageBytes(e);
-
-                // TODO: Only do this part when done. May need to wait some more to get rest of bytes.
-                // echo the data received back to the client
-                // e.SetBuffer(e.Offset, e.BytesTransferred);
-
-                // Setting this to a manual ACK.
-                token.Buffer[0] = 0;
-                token.Buffer[1] = 0;
-                token.Buffer[3] = 0;
-                e.SetBuffer(token.Buffer, 0, 3);
-                bool willRaiseEvent = token.Socket.SendAsync(e);
-                if (!willRaiseEvent)
+                if (token.ClientType == ClientType.Unknown)
                 {
-                    ProcessSend(e);
+                    // If the client is not assigned a state, then go through setup process.
+
+                }
+                else
+                {
+                    // TODO: Need to know when to go back into a read state. Is there a way to do this without recursion?
+                    // TODO: This calls the controller. Seems like the method does too much.
+                    CollectMessageBytes(e);
                 }
             }
             else
@@ -214,11 +202,12 @@ namespace MiniMQ
                 token.Socket.Shutdown(SocketShutdown.Send);
                 token.Socket.Close();
 
+                // TODO: Need to remove from global client holder.
                 // Remove from list of clients.
-                lock (_clients)
-                {
-                    _clients.Remove(token);
-                }
+                //lock (_clients)
+                //{
+                //    _clients.Remove(token);
+                //}
             }
             // throws if client process has already closed
             catch (Exception ex)
@@ -244,10 +233,10 @@ namespace MiniMQ
             MQAsyncUserToken token = (MQAsyncUserToken)e.UserToken;
 
             // If this is the start of collection, figure out message type and number of bytes.
-            if(token.CollectionState.BodySize == 0)
+            if (token.CollectionState.BodySize == 0)
             {
                 // Must have at least 3 bytes in start to know message type and body size.
-                if(e.BytesTransferred >= HEADER_SIZE)
+                if (e.BytesTransferred >= HEADER_SIZE)
                 {
                     var messageTypeRaw = (int)e.Buffer[0];
                     token.CollectionState.MessageType = ToMessageType(messageTypeRaw);
@@ -277,13 +266,58 @@ namespace MiniMQ
             }
 
             // TODO: Probably want to send this back up and let that method decide what to do.
-            if(token.CollectionState.CollectedBodyBytes < token.CollectionState.BodySize)
+            if (token.CollectionState.CollectedBodyBytes < token.CollectionState.BodySize)
             {
-                // Need to go back into receive mode to collect another message chunk.
+                // Need to go back into receive mode to collect another message chunk. But, need to do it in a way
+                // that doesn't cause a giant stack.
+
+                // TODO: This can stack overflow if enough chunks sent.
+                bool willRaiseEvent = token.Socket.ReceiveAsync(e);
+                if (!willRaiseEvent)
+                {
+                    ProcessReceive(e);
+                }
             }
             else
             {
+                // TODO: Probably want to move somewhere because this method does a lot.
                 // Send off to controller.
+                var result = _controller.ProcessMessage(token);
+                SendResult(e, result);
+            }
+        }
+
+        private void SetupClient(SocketAsyncEventArgs e)
+        {
+            const int HANDSHAKE_SIZE = 2;
+            MQAsyncUserToken token = (MQAsyncUserToken)e.UserToken;
+
+            if (e.BytesTransferred == HANDSHAKE_SIZE)
+            {
+
+            }
+            else
+            {
+                // TODO: Send an error and close connection.
+            }
+        }
+
+        private void SendResult(SocketAsyncEventArgs e, MQActionResult result)
+        {
+            // TODO: Implement
+            MQAsyncUserToken token = (MQAsyncUserToken)e.UserToken;
+
+            Log.Debug("Sending result to {Client}", token.Id);
+
+            // Setting this to a manual ACK.
+            token.Buffer[0] = 0;
+            token.Buffer[1] = 0;
+            token.Buffer[3] = 0;
+            e.SetBuffer(token.Buffer, 0, 3);
+            bool willRaiseEvent = token.Socket.SendAsync(e);
+            if (!willRaiseEvent)
+            {
+                ProcessSend(e);
             }
         }
 

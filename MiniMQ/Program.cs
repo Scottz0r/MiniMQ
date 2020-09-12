@@ -18,6 +18,29 @@ namespace MiniMQ
 
     class Program
     {
+        //static void Main(string[] args)
+        //{
+        //    Log.Logger = new LoggerConfiguration()
+        //        .Enrich.With(new ThreadIdEnricher())
+        //        .WriteTo.Console(
+        //            outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] ({ThreadId}) {Message:lj}{NewLine}{Exception}"
+        //        )
+        //        .MinimumLevel.Debug()
+        //        .CreateLogger();
+
+        //    Log.Information("Mini MQ - a lightweight Message Queue.");
+
+        //    IPHostEntry ipHostInfo = Dns.GetHostEntry(Dns.GetHostName());
+        //    IPAddress ipAddress = ipHostInfo.AddressList[0];
+        //    IPEndPoint localEndPoint = new IPEndPoint(ipAddress, 11000);
+
+        //    var s = new MQServer();
+        //    s.Init();
+        //    s.Start(localEndPoint);
+
+        //    Environment.Exit(0);
+        //}
+
         static void Main(string[] args)
         {
             Log.Logger = new LoggerConfiguration()
@@ -30,13 +53,16 @@ namespace MiniMQ
 
             Log.Information("Mini MQ - a lightweight Message Queue.");
 
+            // Listener
             IPHostEntry ipHostInfo = Dns.GetHostEntry(Dns.GetHostName());
             IPAddress ipAddress = ipHostInfo.AddressList[0];
             IPEndPoint localEndPoint = new IPEndPoint(ipAddress, 11000);
 
-            var s = new MQServer();
+            var s = new MQProducerServer();
             s.Init();
-            s.Start(localEndPoint);
+            var producerTask = s.Start(localEndPoint, new CancellationToken());
+
+            producerTask.Wait();
 
             Environment.Exit(0);
         }
