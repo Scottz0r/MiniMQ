@@ -5,26 +5,22 @@ using System.Text;
 
 namespace MiniMQ
 {
-    public class ProducerToken
+    public class ConsumerToken
     {
         public Guid Id { get; }
 
-        public Socket Socket { get; }
-
-        public byte[] Buffer { get; set; }
-
-        public int CollectedBytes { get; set; }
+        public Socket Socket { get; set; }
 
         public DateTime LastActivity { get; set; }
 
-        // TODO: Better way to manage this buffer because it'll be passed around.
-        public byte[] MessageContents { get; set; }
+        public byte[] Buffer { get; set; }
 
-        public ProducerToken(Socket socket)
+        public Guid? AckMessageId { get; set; }
+
+        public ConsumerToken(Socket socket)
         {
             Id = Guid.NewGuid();
             Socket = socket;
-            CollectedBytes = 0;
 
             UpdateActivity();
         }

@@ -10,7 +10,7 @@ using System.Collections.Concurrent;
 
 namespace MiniMQ
 {
-    enum ProducerActions
+    public enum ProducerActions
     {
         Put = 0,
         Heartbeat = 1
@@ -33,7 +33,7 @@ namespace MiniMQ
 
         public void Init()
         {
-            Log.Information("Initializing server");
+            Log.Information("Initializing Producer server");
         }
 
         public Task Start(IPEndPoint localEndPoint, CancellationToken cancellationToken)
@@ -55,9 +55,10 @@ namespace MiniMQ
             var acceptEventArg = new SocketAsyncEventArgs();
             acceptEventArg.Completed += new EventHandler<SocketAsyncEventArgs>(ProcessAccept);
 
+            // TODO: Need to wrap this in a try/catch for CancellationToken.
             while (!cancellationToken.IsCancellationRequested)
             {
-                await _acceptSemaphore.WaitAsync();
+                await _acceptSemaphore.WaitAsync(cancellationToken);
 
                 acceptEventArg.AcceptSocket = null;
 
@@ -69,10 +70,31 @@ namespace MiniMQ
 
             Log.Information("Producer shutting down connections.");
 
-            // TODO: Close all producer sockets.
+            Log.Information("Shutting down producer listener socket.");
+            try
+            {
+                _listenSocket.Shutdown(SocketShutdown.Both);
+                _listenSocket.Close();
+            }
+            catch(Exception ex)
+            {
+                Log.Warning("An exception occurred when shutting down the producer listener: {Error}", ex);
+            }
 
-            _listenSocket.Shutdown(SocketShutdown.Both);
-            _listenSocket.Close();
+            Log.Information("Shutting down producer sockets.");
+            foreach (var sk in _producers)
+            {
+                try
+                {
+                    sk.Value.Socket.Shutdown(SocketShutdown.Both);
+                    sk.Value.Socket.Close();
+                }
+                catch(Exception ex)
+                {
+                    Log.Warning("An exception occurred when shutting down socket {Id}: {Error}", sk.Key, ex);
+                }
+            }
+            _producers.Clear();
         }
 
         public void ProcessAccept(object sender, SocketAsyncEventArgs e)
@@ -232,7 +254,9 @@ namespace MiniMQ
                 {
                     Log.Debug("Message completely received from {Client}.", token.Id);
 
-                    // TODO: Add content to queue.
+                    // Add content to queue.
+                    var newMessage = new Message(token.MessageContents);
+                    MessageQueue.Add(newMessage);
 
                     // Reset collection state.
                     token.CollectedBytes = 0;
@@ -302,7 +326,7 @@ namespace MiniMQ
 
             var clientId = token.Id;
 
-            // close the socket associated with the client
+            // Close the socket associated with the client
             try
             {
                 token.Socket.Shutdown(SocketShutdown.Send);
@@ -312,10 +336,9 @@ namespace MiniMQ
                 ProducerToken removeToken;
                 _producers.TryRemove(token.Id, out removeToken);
             }
-            // throws if client process has already closed
             catch (Exception ex)
             {
-                // TODO: Log
+                Log.Error("An error occurred when closing the producer client: {Error}", ex);
             }
 
             // decrement the counter keeping track of the total number of clients connected to the server
