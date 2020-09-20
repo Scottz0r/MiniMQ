@@ -117,7 +117,7 @@ namespace MiniMQ
                 var consumer = new Consumer(e.AcceptSocket, buffer);
                 Log.Information("Consumer client connected. Client Id: {0}", consumer.Id);
 
-                // TODO: Need to hold on to consumer somewhere.
+                _consumers.Add(consumer);
             }
             catch (Exception ex)
             {

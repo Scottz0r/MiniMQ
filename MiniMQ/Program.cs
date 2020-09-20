@@ -52,7 +52,7 @@ namespace MiniMQ
             var consumerEndPoint = new IPEndPoint(ipAddress, 11001);
             var consumerServer = new MQConsumerServer();
             consumerServer.Init();
-            var consumerTask = producerServer.Start(consumerEndPoint, tokenSource.Token);
+            var consumerTask = consumerServer.Start(consumerEndPoint, tokenSource.Token);
 
             Task.WaitAll(producerTask, consumerTask);
 

@@ -137,21 +137,51 @@ namespace MiniMQ
 
         void IOCompleted(object sender, SocketAsyncEventArgs e)
         {
-            switch (e.LastOperation)
+            // Infinite loop because very high volumes of traffic will never need to be asynchronous. This will prevent a stack overflow by
+            // going back into a "message receive" mode once the incoming message and ACK is sent.
+            for (; ; ) // TODO: Token cancellation?
             {
-                case SocketAsyncOperation.Receive:
-                    ProcessReceive(e);
-                    break;
-                case SocketAsyncOperation.Send:
-                    ProcessSend(e);
-                    break;
-                default:
-                    // Log. This should never happen, but don't blow up.
-                    break;
+                bool isPendingAsync;
+
+                switch (e.LastOperation)
+                {
+                    case SocketAsyncOperation.Receive:
+                        // Go back into receive depending if message collection and ACK work flow is waiting an asynchronous operation.
+                        isPendingAsync = ProcessReceive(e);
+                        break;
+                    case SocketAsyncOperation.Send:
+                        ProcessSend(e);
+                        // Always go back into receive mode upon a send.
+                        isPendingAsync = false;
+                        break;
+                    default:
+                        // Log. This should never happen, but don't blow up.
+                        Log.Error("Unexpected LastOperation from socket: {LastOperation}", e.LastOperation);
+                        return;
+                }
+
+                if(!isPendingAsync)
+                {
+                    // Reset buffer size before going back into send mode.
+                    ProducerToken token = (ProducerToken)e.UserToken;
+                    e.SetBuffer(token.Buffer, 0, token.Buffer.Length);
+
+                    if (token.Socket.ReceiveAsync(e))
+                    {
+                        // Going to wait for an asynchronous operation, so break out of this function. Otherwise, process synchronously.
+                        return;
+                    }
+                }
+                else
+                {
+                    // If not going back into receive mode, break out of this infinite loop.
+                    return;
+                }
             }
         }
 
-        private void ProcessReceive(SocketAsyncEventArgs e)
+        // Returns true if this is waiting an asynchronous operation.
+        private bool ProcessReceive(SocketAsyncEventArgs e)
         {
             // Check if the remote host closed the connection
             ProducerToken token = (ProducerToken)e.UserToken;
@@ -159,16 +189,18 @@ namespace MiniMQ
             {
                 Log.Debug("Received {Bytes} from client {ClientId}", e.BytesTransferred, token.Id);
 
-                CollectMessageBytes(e);
+                return CollectMessageBytes(e);
             }
             else
             {
                 // Zero bytes, but a receive indicates a graceful shutdown by client.
                 CloseClientSocket(e);
+                return false;
             }
         }
 
-        private void CollectMessageBytes(SocketAsyncEventArgs e)
+        // Returns true if this is waiting an asynchronous operation.
+        private bool CollectMessageBytes(SocketAsyncEventArgs e)
         {
             ProducerToken token = (ProducerToken)e.UserToken;
 
@@ -177,8 +209,7 @@ namespace MiniMQ
 
             // TODO: This should probably be split up into multiple methods maybe.
 
-            bool done = false;
-            while(!done)
+            for(; ; )
             {
                 // If no bytes collected, then need to process the action to know what to do with request.
                 if(token.CollectedBytes == 0)
@@ -190,20 +221,17 @@ namespace MiniMQ
                             // Heartbeats as a single byte message that get responded to with an ACK.
                             if (e.BytesTransferred > 1)
                             {
-                                SendError(e, 2); // TODO - Error codes. Malformed message.
-                                return;
+                                return SendError(e, 2); // TODO - Error codes. Malformed message.
                             }
 
-                            SendAck(e);
-                            return;
+                            return SendAck(e);
                         }
                         else if(e.Buffer[0] == (byte)ProducerActions.Put)
                         {
                             // Must be enough bytes in message to parse a length.
                             if(e.BytesTransferred < 3) // TODO: Probably need some constants.
                             {
-                                SendError(e, 2); // TODO - Error codes. Malformed message.
-                                return;
+                                return SendError(e, 2); // TODO - Error codes. Malformed message.
                             }
 
                             var networkSize = BitConverter.ToInt16(e.Buffer, 1);
@@ -216,8 +244,7 @@ namespace MiniMQ
                         }
                         else
                         {
-                            SendError(e, 1); // TODO - Error Codes - Unknown action type.
-                            return;
+                            return SendError(e, 1); // TODO - Error Codes - Unknown action type.
                         }
                     }
                 }
@@ -230,8 +257,7 @@ namespace MiniMQ
                         token.CollectedBytes = 0;
                         token.MessageContents = null; // TODO: Return buffer to manager.
 
-                        SendError(e, 2); // TODO - Error codes. Malformed message.
-                        return;
+                        return SendError(e, 2); // TODO - Error codes. Malformed message.
                     }
 
                     // Need to complete collecting the entire message.
@@ -247,7 +273,7 @@ namespace MiniMQ
                     // this method. Otherwise, do another loop. This will prevent stack overflowing on multiple chunks.
                     if (token.Socket.ReceiveAsync(e))
                     {
-                        return;
+                        return true; // Waiting on an asynchronous operation.
                     }
                 }
                 else
@@ -263,13 +289,12 @@ namespace MiniMQ
                     token.MessageContents = null; // TODO: Queue would take ownership of MessageContents from the token.
 
                     // Tell producer client message was received.
-                    SendAck(e);
-                    return;
+                    return SendAck(e);
                 }
             }
         }
 
-        private void SendAck(SocketAsyncEventArgs e)
+        private bool SendAck(SocketAsyncEventArgs e)
         {
             ProducerToken token = (ProducerToken)e.UserToken;
             Log.Debug("Sending ACK to {Client}", token.Id);
@@ -279,10 +304,13 @@ namespace MiniMQ
             if(!token.Socket.SendAsync(e))
             {
                 ProcessSend(e);
+                return false;
             }
+
+            return true;
         }
 
-        private void SendError(SocketAsyncEventArgs e, byte errorCode)
+        private bool SendError(SocketAsyncEventArgs e, byte errorCode)
         {
             ProducerToken token = (ProducerToken)e.UserToken;
             Log.Debug("Sending Error to {Client}", token.Id);
@@ -294,25 +322,20 @@ namespace MiniMQ
             if (!token.Socket.SendAsync(e))
             {
                 ProcessSend(e);
+                return false;
             }
+
+            return true;
         }
 
         private void ProcessSend(SocketAsyncEventArgs e)
         {
             if (e.SocketError == SocketError.Success)
             {
-                // Done sending message to producer client. Go back to waiting for more data.
                 ProducerToken token = (ProducerToken)e.UserToken;
                 Log.Debug("Send to {ClientId} successful", token.Id);
 
-                // Reset buffer size before going back into send mode.
-                e.SetBuffer(token.Buffer, 0, token.Buffer.Length);
-
-                // Go back into receive mode.
-                if (!token.Socket.ReceiveAsync(e))
-                {
-                    ProcessReceive(e);
-                }
+                // Do nothing else. If this went to receive here, then a stack overflow would happen with high traffic.
             }
             else
             {
@@ -341,14 +364,6 @@ namespace MiniMQ
                 Log.Error("An error occurred when closing the producer client: {Error}", ex);
             }
 
-            // decrement the counter keeping track of the total number of clients connected to the server
-            // Interlocked.Decrement(ref m_numConnectedSockets);
-
-            // Free the SocketAsyncEventArg so they can be reused by another client
-            // m_readWritePool.Push(e);
-
-            // m_maxNumberAcceptedClients.Release();
-            // Console.WriteLine("A client has been disconnected from the server. There are {0} clients connected to the server", m_numConnectedSockets);
             Log.Information("Client {ClientId} has been disconnected", clientId);
         }
     }

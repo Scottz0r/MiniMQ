@@ -27,6 +27,18 @@ namespace MiniMQ
             // Caution: These are going to be coming from different threads.
             consumer.OnStateChanged += ConsumerStateChange;
             consumer.OnMessageAck += ConsumerMessageAck;
+
+            if(_consumers.TryAdd(consumer.Id, consumer))
+            {
+                _readyConsumers.Enqueue(consumer.Id);
+                _clientReadyEvent.Set();
+            }
+            else
+            {
+                // TODO: This should happen, but handle anyway.
+                Log.Error("Consumer {Id} failed to be added. Disconnecting.", consumer.Id);
+                consumer.Close(true);
+            }
         }
 
         public Consumer NextAvailableConsumer()
@@ -74,6 +86,12 @@ namespace MiniMQ
 
             if(consumer.State == ConsumerState.Closed)
             {
+                // If the consumer is holding on to a message, it needs to be put back into the queue.
+                if(consumer.CurrentMessageId.HasValue)
+                {
+                    MessageQueue.RequeueFromHolding(consumer.CurrentMessageId.Value);
+                }
+
                 _consumers.TryRemove(consumer.Id, out Consumer _);
                 // No need to touch queue. If the ID isn't in the consumer's dictionary, then it will be ignored.
             }

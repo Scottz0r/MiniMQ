@@ -12,8 +12,6 @@ namespace MiniMQ
 
         private readonly SocketAsyncEventArgs _eventArgs;
 
-        private Guid? _lastMessageId;
-
         public Guid Id { get; }
 
         public DateTime LastActivity { get; private set; }
@@ -23,6 +21,8 @@ namespace MiniMQ
         public byte[] Buffer { get; }
 
         public ConsumerState State { get; private set; }
+
+        public Guid? CurrentMessageId { get; private set; }
 
         public event EventHandler<EventArgs> OnStateChanged;
 
@@ -54,8 +54,8 @@ namespace MiniMQ
 
             Log.Debug("Sending Message {MessageId} to {ClientId}", message.Id, Id);
 
-            // TODO: Message size property.
-            _lastMessageId = message.Id;
+            // TODO: Message size property. Also need to put a header in the message to indicate the message type and body size.
+            CurrentMessageId = message.Id;
             _eventArgs.SetBuffer(message.Buffer, 0, message.Buffer.Length);
             if (!Socket.SendAsync(_eventArgs))
             {
@@ -115,13 +115,13 @@ namespace MiniMQ
                 if (_eventArgs.BytesTransferred > 0 && _eventArgs.Buffer[0] == CONSUMER_ACK_BYTE)
                 {
                     // Assumes there is a message, but check to be safe.
-                    if(_lastMessageId != null)
+                    if(CurrentMessageId != null)
                     {
-                        OnMessageAck?.Invoke(this, _lastMessageId.Value);
+                        OnMessageAck?.Invoke(this, CurrentMessageId.Value);
                     }
 
                     // Clear state from last message send.
-                    _lastMessageId = null;
+                    CurrentMessageId = null;
 
                     // Notify that this Client is ready.
                     State = ConsumerState.Ready;
@@ -152,10 +152,12 @@ namespace MiniMQ
                 {
                     ProcessReceive();
                 }
-
-                // If ran asynchronously, trigger a state change.
-                State = ConsumerState.WaitingResponse;
-                OnStateChanged?.Invoke(this, new EventArgs());
+                else
+                {
+                    // If ran asynchronously, trigger a state change.
+                    State = ConsumerState.WaitingResponse;
+                    OnStateChanged?.Invoke(this, new EventArgs());
+                }
             }
             else
             {
