@@ -54,9 +54,9 @@ namespace MiniMQ
 
             Log.Debug("Sending Message {MessageId} to {ClientId}", message.Id, Id);
 
-            // TODO: Message size property. Also need to put a header in the message to indicate the message type and body size.
+            // Set the output buffer to the message's data.
             CurrentMessageId = message.Id;
-            _eventArgs.SetBuffer(message.Buffer, 0, message.Buffer.Length);
+            _eventArgs.SetBuffer(message.Buffer);
             if (!Socket.SendAsync(_eventArgs))
             {
                 ProcessSend();
@@ -145,6 +145,7 @@ namespace MiniMQ
                 Log.Debug("Send to {ClientId} successful", Id);
 
                 // Reset buffer size before going back into send mode.
+                _eventArgs.SetBuffer(Buffer);
                 _eventArgs.SetBuffer(Buffer, 0, Buffer.Length);
 
                 // Go back into receive mode to listen for an ACK.

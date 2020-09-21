@@ -7,6 +7,7 @@ using System.Threading;
 using Serilog;
 using System.Threading.Tasks;
 using System.Collections.Concurrent;
+using System.Buffers;
 
 namespace MiniMQ
 {
@@ -18,9 +19,10 @@ namespace MiniMQ
 
     public class MQProducerServer
     {
-        private readonly ConcurrentDictionary<Guid, ProducerToken> _producers = new ConcurrentDictionary<Guid, ProducerToken>();
-
         private const int LISTEN_ACCEPT_BACKLOG = 100;
+        private const int RECEIVE_BUFFER_SIZE = 1024 * 16;
+
+        private readonly ConcurrentDictionary<Guid, ProducerToken> _producers = new ConcurrentDictionary<Guid, ProducerToken>();
 
         private Socket _listenSocket;
 
@@ -86,8 +88,7 @@ namespace MiniMQ
             {
                 try
                 {
-                    sk.Value.Socket.Shutdown(SocketShutdown.Both);
-                    sk.Value.Socket.Close();
+                    sk.Value.Dispose();
                 }
                 catch(Exception ex)
                 {
@@ -108,8 +109,7 @@ namespace MiniMQ
 
             try
             {
-                var token = new ProducerToken(e.AcceptSocket);
-                token.Buffer = new byte[4096]; // TODO: Buffer manager to reduce memory allocations.
+                var token = new ProducerToken(e.AcceptSocket, RECEIVE_BUFFER_SIZE);
                 Log.Information("Producer client connected. Client Id: {0}", token.Id);
 
                 _producers[token.Id] = token;
@@ -118,7 +118,7 @@ namespace MiniMQ
                 SocketAsyncEventArgs readEventArgs = new SocketAsyncEventArgs();
                 readEventArgs.UserToken = token;
                 readEventArgs.Completed += new EventHandler<SocketAsyncEventArgs>(IOCompleted);
-                readEventArgs.SetBuffer(token.Buffer, 0, token.Buffer.Length);
+                readEventArgs.SetBuffer(token.Buffer);
 
                 if(!token.Socket.ReceiveAsync(readEventArgs))
                 {
@@ -162,9 +162,9 @@ namespace MiniMQ
 
                 if(!isPendingAsync)
                 {
-                    // Reset buffer size before going back into send mode.
+                    // Reset buffer size before going back into receive mode.
                     ProducerToken token = (ProducerToken)e.UserToken;
-                    e.SetBuffer(token.Buffer, 0, token.Buffer.Length);
+                    e.SetBuffer(token.Buffer);
 
                     if (token.Socket.ReceiveAsync(e))
                     {
@@ -203,6 +203,7 @@ namespace MiniMQ
         private bool CollectMessageBytes(SocketAsyncEventArgs e)
         {
             ProducerToken token = (ProducerToken)e.UserToken;
+            ReadOnlySpan<byte> buffSpan = token.Buffer.Span;
 
             // Mark the client as being active.
             token.UpdateActivity();
@@ -212,11 +213,12 @@ namespace MiniMQ
             for(; ; )
             {
                 // If no bytes collected, then need to process the action to know what to do with request.
-                if(token.CollectedBytes == 0)
+                //if(token.CollectedBytes == 0)
+                if(token.MessageCollector == null)
                 {
                     if(e.BytesTransferred > 0)
                     {
-                        if(e.Buffer[0] == (byte)ProducerActions.Heartbeat)
+                        if(buffSpan[0] == (byte)ProducerActions.Heartbeat)
                         {
                             // Heartbeats as a single byte message that get responded to with an ACK.
                             if (e.BytesTransferred > 1)
@@ -226,7 +228,7 @@ namespace MiniMQ
 
                             return SendAck(e);
                         }
-                        else if(e.Buffer[0] == (byte)ProducerActions.Put)
+                        else if(buffSpan[0] == (byte)ProducerActions.Put)
                         {
                             // Must be enough bytes in message to parse a length.
                             if(e.BytesTransferred < 3) // TODO: Probably need some constants.
@@ -234,13 +236,13 @@ namespace MiniMQ
                                 return SendError(e, 2); // TODO - Error codes. Malformed message.
                             }
 
-                            var networkSize = BitConverter.ToInt16(e.Buffer, 1);
+                            var networkSize = BitConverter.ToInt16(buffSpan.Slice(1, 2));
                             var localSize = (ushort)IPAddress.NetworkToHostOrder(networkSize);
 
-                            token.MessageContents = new byte[localSize];
                             int thisChunkSize = e.BytesTransferred - 3;
-                            Array.Copy(e.Buffer, 3, token.MessageContents, 0, thisChunkSize);
-                            token.CollectedBytes = thisChunkSize;
+                            token.StartCollecting(localSize);
+                            var thisChunk = buffSpan.Slice(3, thisChunkSize);
+                            token.MessageCollector.Append(thisChunk);
                         }
                         else
                         {
@@ -250,24 +252,12 @@ namespace MiniMQ
                 }
                 else
                 {
-                    // Need to range check to make bounds of contents not exceeded.
-                    if(token.CollectedBytes + e.BytesTransferred > token.MessageContents.Length)
-                    {
-                        // Reset collection state.
-                        token.CollectedBytes = 0;
-                        token.MessageContents = null; // TODO: Return buffer to manager.
-
-                        return SendError(e, 2); // TODO - Error codes. Malformed message.
-                    }
-
                     // Need to complete collecting the entire message.
-                    Array.Copy(e.Buffer, 0, token.MessageContents, token.CollectedBytes, e.BytesTransferred);
-                    token.CollectedBytes += e.BytesTransferred;
+                    var thisChunk = buffSpan.Slice(0, e.BytesTransferred);
+                    token.MessageCollector.Append(thisChunk);
                 }
 
-                // TODO: Would want another variable to know actual length because buffer may be larger if they are
-                // getting reused.
-                if(token.CollectedBytes < token.MessageContents.Length)
+                if(!token.MessageCollector.CollectionCompleted)
                 {
                     // Need to listen for more bytes in the message. If the operation is async, then break out of
                     // this method. Otherwise, do another loop. This will prevent stack overflowing on multiple chunks.
@@ -280,13 +270,14 @@ namespace MiniMQ
                 {
                     Log.Debug("Message completely received from {Client}.", token.Id);
 
-                    // Add content to queue.
-                    var newMessage = new Message(token.MessageContents);
+                    // Add content to queue. Take memory from collector and move to message.
+                    int messageSize = token.MessageCollector.MessageSize;
+                    IMemoryOwner<byte> messageMemory = token.MessageCollector.TakeMemory();
+                    var newMessage = new Message(messageMemory, messageSize);
                     MessageQueue.Add(newMessage);
 
-                    // Reset collection state.
-                    token.CollectedBytes = 0;
-                    token.MessageContents = null; // TODO: Queue would take ownership of MessageContents from the token.
+                    // Remove all collection state from this producer's message collector.
+                    token.ClearCollector();
 
                     // Tell producer client message was received.
                     return SendAck(e);
@@ -299,8 +290,12 @@ namespace MiniMQ
             ProducerToken token = (ProducerToken)e.UserToken;
             Log.Debug("Sending ACK to {Client}", token.Id);
 
-            token.Buffer[0] = 0;
-            e.SetBuffer(token.Buffer, 0, 1);
+            var buffSpan = token.Buffer.Span;
+            buffSpan[0] = 0;
+
+            var sendMemory = token.Buffer.Slice(0, 1);
+            e.SetBuffer(sendMemory);
+
             if(!token.Socket.SendAsync(e))
             {
                 ProcessSend(e);
@@ -315,10 +310,13 @@ namespace MiniMQ
             ProducerToken token = (ProducerToken)e.UserToken;
             Log.Debug("Sending Error to {Client}", token.Id);
 
-            token.Buffer[0] = 1;
-            token.Buffer[1] = errorCode;
+            var buffSpan = token.Buffer.Span;
+            buffSpan[0] = 1;
+            buffSpan[1] = errorCode;
 
-            e.SetBuffer(token.Buffer, 0, 2);
+            var sendMemory = token.Buffer.Slice(0, 2);
+            e.SetBuffer(sendMemory);
+
             if (!token.Socket.SendAsync(e))
             {
                 ProcessSend(e);

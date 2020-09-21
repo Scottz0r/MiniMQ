@@ -39,8 +39,11 @@ namespace MiniMQ
 
         public static void RemoveFromHolding(Guid id)
         {
-            // TODO: Need to return message's buffer to the manager. This is the end of the message's lifetime.
-            _holding.TryRemove(id, out Message _);
+            // Need to return message's buffer to the manager. This is the end of the message's lifetime.
+            if(_holding.TryRemove(id, out Message message))
+            {
+                message.Dispose(); // Dispose to return memory to pool.
+            }
         }
 
         public static void RequeueFromHolding(Guid id)

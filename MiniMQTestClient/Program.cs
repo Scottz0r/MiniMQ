@@ -56,8 +56,8 @@ namespace MiniMQTestClient
 
                 while (!cancellationToken.IsCancellationRequested)
                 {
-                    //Console.Write("Press enter to send.");
-                    //Console.ReadLine();
+                    Console.Write("Press enter to send.");
+                    Console.ReadLine();
 
                     // Encode the data string into a byte array.
                     byte[] body = Encoding.ASCII.GetBytes("This is a test");
